@@ -1,0 +1,288 @@
+#include "FS.h"
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
+byte sendEmail(int x);
+void sendValueThingspeak(int x);
+byte eRcv(WiFiClientSecure client);
+ 
+String to_email = ""; 
+int valueLight = -1;
+ESP8266WebServer server (80);
+char htmlResponse[1800];
+char buff[1600] = "";
+
+
+void handleRoot() {
+  char* html = "<!DOCTYPE html>\
+  <html lang='en'>\
+       <head> <meta charset='utf-8'> <title>Concentrado arduino</title> <link type='text/css' rel='stylesheet' href='https://unpkg.com/purecss@1.0.0/build/pure-min.css'> </head>\
+    <body>\
+    <form id='form' class='pure-form pure-form-stacked margin-left: auto; margin-right> auto; max-width: 768px;'>\
+    <fieldset>\
+        <legend><b>Configurar notificação do sensor de luminosidade</b></legend>\
+        <label for='email'>Contato</label>\
+        <input id='email' type='email' placeholder='Email'> <br>\
+        <label for='valor'>Luminosidade</label>\
+        <input id='valor' type='text' placeholder='Valor'> <br>\
+        <button type='submit' class='pure-button pure-button-primary'>Enviar</button>\
+    </fieldset>\
+    </form>\
+    <script>\
+    var storedEmail = localStorage.getItem('email');\
+    var storedValor = localStorage.getItem('valor');\
+    document.getElementById('email').value = storedEmail;\
+    document.getElementById('valor').value = storedValor;\
+    var form = document.getElementById('form');\
+    form.addEventListener('submit', save);\
+    httpGetAsync('/load', storedEmail, storedValor);\
+    function httpGetAsync(path, email, valor) {\
+      var http = new XMLHttpRequest();\
+        http.onreadystatechange = function() {\
+            if (http.readyState == 4 & http.status == 200){\
+              if(!http.responseText){return;}\
+              alert(http.responseText);\
+            }\
+        };\
+        var url = path + '?' + 'email=' + email + '&valor=' + valor;\
+        http.open('GET', url, true);\
+        http.send(null);\
+    }\  
+    function save() {\  
+      console.log('entrou');\
+        var email = document.getElementById('email').value;\
+        var valor = document.getElementById('valor').value;\
+        localStorage.setItem('email', email);\
+        localStorage.setItem('valor', valor);\
+      if (!email || !valor) { alert('Por favor preencha os campos com suas informações.')}\
+        httpGetAsync('/save', email, valor);\
+    }\
+    </script>\
+  </body>\
+  </html>";
+  server.send (200, "text/html", html);  
+}
+
+void formatFS(void){
+  SPIFFS.format();
+}
+ 
+void createFile(void){
+  File wFile;
+
+  if(SPIFFS.exists("/log.txt")){
+    Serial.println("Arquivo ja existe!");
+  } else {
+    Serial.println("Criando o arquivo...");
+    wFile = SPIFFS.open("/log.txt","w+");
+ 
+    if(!wFile){
+      Serial.println("Erro ao criar arquivo!");
+    } else {
+      Serial.println("Arquivo criado com sucesso!");
+    }
+  }
+  wFile.close();
+}
+
+void writeFile(String msg) {
+  File rFile = SPIFFS.open("/log.txt","a+");
+ 
+  if(!rFile){
+    Serial.println("Erro ao abrir arquivo!");
+  } else {
+    rFile.println(msg);
+  }
+  rFile.close();
+}
+ 
+void readFile(void) {
+  if(SPIFFS.exists("/log.txt") == 0){
+    return;
+  }
+  
+  File rFile = SPIFFS.open("/log.txt","r");
+  Serial.println("Lendo arquivo");
+  while(rFile.available()) {
+    String line = rFile.readStringUntil('\n');
+    char content[line.length()+1];
+    strcpy(content, line.c_str());
+    strcat(buff, content);
+  }
+  rFile.close();
+}
+ 
+void closeFS(void){
+  SPIFFS.end();
+}
+
+void openFS(void){
+  //Abre o sistema de arquivos
+  if(!SPIFFS.begin()){
+    Serial.println("Erro ao abrir o sistema de arquivos");
+  } else {
+    Serial.println("Sistema de arquivos aberto com sucesso!");
+  }
+}
+
+void handleLoad() {
+ to_email = server.arg("email");
+ valueLight = server.arg("valor").toInt();
+server.send ( 200, "text/html", "");
+}
+
+void handleSave() {
+  if (server.arg("email")!= "" && server.arg("valor")!= ""){
+    Serial.println("salvou: " + server.arg("email") + "|" + server.arg("valor"));  
+    SPIFFS.remove("/log.txt");
+    writeFile(server.arg("email") + "|" + server.arg("valor"));
+    to_email = server.arg("email");
+    valueLight = server.arg("valor").toInt();
+  }
+  server.send ( 200, "text/html", "Informações salvas com sucesso!");
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  delay(10);
+  Serial.println("");
+  Serial.print("Conectando... ");
+  WiFi.begin("GL-iNet-866", "goodlife");
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("Wifi conectado");
+  Serial.print("Ip: ");
+  Serial.println(WiFi.localIP());
+
+  server.on ( "/", handleRoot );
+  server.on ("/save", handleSave);
+  server.on("/load", handleLoad);
+
+  server.begin();
+  Serial.println ( "HTTP server started" );
+}
+
+void loop()
+{
+  server.handleClient();
+  
+  if(valueLight > -1){
+    int analogValue = analogRead(A0);
+    Serial.println(analogValue);
+    if(analogValue > valueLight){
+        if (sendEmail(analogValue)){
+          Serial.println(F("Email enviado"));
+        }
+        else{
+          Serial.println(F("Ocorreu erro ao enviar o email")); 
+        }
+       sendValueThingspeak(analogValue);     
+    }
+  }
+  delay(5000);
+}
+
+void sendValueThingspeak(int x){
+  WiFiClient client;
+  if(!client.connect("api.thingspeak.com", 80 )){
+    Serial.println("Ocorreu erro ao se conectar com o ThingSpeak");
+  }
+  
+  String parameters = "/update?api_key=AL6U9ILCW1K215V6&field1=";
+  parameters += x;
+  
+  client.print(String("GET ") + parameters + " HTTP/1.1\r\n" +
+               "Host: api.thingspeak.com\r\n" + 
+               "Connection: close\r\n\r\n");
+  unsigned long timeOut = millis();
+  while (client.available() == 0) {
+    if (millis() - timeOut > 5000) {
+      Serial.println("Conexão perdida");
+      client.stop();
+    }
+  }
+
+  if(client.available()){
+    Serial.println("Valor enviado para o ThingSpeak");
+  }
+}
+
+byte sendEmail(int x) 
+{
+  WiFiClientSecure client;
+  if (client.connect("smtp.gmail.com", 465) == 1){
+    Serial.println(F("Conectado com o email")); 
+  }else {   
+    Serial.println(F("Ocorreu erro ao se conectar com o email"));   
+    return 0; 
+    }
+  if (!eRcv(client))
+    return 0;
+  client.println("EHLO 1.2.3.4"); 
+  if (!eRcv(client))
+    return 0;
+  client.println("AUTH LOGIN"); 
+  if (!eRcv(client)) 
+    return 0;
+  client.println("Y29uY2VudHJhZG8udG9waWNvc2VzcGVjaWFpc0BnbWFpbC5jb20="); 
+  if (!eRcv(client)) 
+    return 0;
+  client.println("QXNkMTIzQXNk"); 
+  if (!eRcv(client)) 
+    return 0;
+  client.println("MAIL From: <concentrado.topicosespeciais@gmail.com>"); 
+  if (!eRcv(client)) 
+    return 0;
+  client.println("RCPT TO: <"+to_email+">"); 
+  if (!eRcv(client)) 
+    return 0;
+  client.println(F("DATA")); 
+  if (!eRcv(client)) 
+    return 0;
+  client.println(F("Subject: Envio de email automático\r\n"));
+  client.println(F("Prezado,\n\nEste email foi enviado automaticamente, pois o valor do sensor de luz passou o limite informado."));
+  client.println(F("\nAtenciosamente,\nEsp8266."));
+  client.println(F("."));
+  if (!eRcv(client)) 
+    return 0;
+  client.println(F("QUIT"));
+  if (!eRcv(client)) 
+    return 0;
+  client.stop();
+  return 1;
+}
+
+byte eRcv(WiFiClientSecure client)
+{
+  byte respCode;
+  byte thisByte;
+  int loopCount = 0;
+
+  while (!client.available()) {
+    delay(1);
+    loopCount++;
+    if (loopCount > 10000) {
+      client.stop();
+      Serial.println(F("\r\nTimeout"));
+      return 0;
+    }
+  }
+
+  respCode = client.peek();
+  while (client.available())
+  {
+    thisByte = client.read();
+    Serial.write(thisByte);
+  }
+  
+  if (respCode >= '4'){
+    return 0; 
+  }
+  
+  return 1;
+}
